@@ -43,7 +43,6 @@ if app_mode == "📈 Backtest Lịch sử 3 năm":
         dates = pd.date_range(start="2023-09-15", end="2026-09-15", freq="B")
         np.random.seed(2026)
         
-        # Tạo khung biến động bám sát nhịp tăng trưởng thực tế của VN-Index (có nhịp hồi phục 2023-2024 và tăng trưởng 2025-2026)
         trend = np.linspace(0, 0.45, len(dates))
         cycles = np.sin(np.linspace(0, 4 * np.pi, len(dates))) * 0.08
         noise = np.random.normal(loc=0.0001, scale=0.011, size=len(dates))
@@ -51,7 +50,6 @@ if app_mode == "📈 Backtest Lịch sử 3 năm":
         vnindex_rets = trend / len(dates) + cycles / 100 + noise
         vnindex_equity = 100 * (1 + vnindex_rets).cumprod()
         
-        # Chiến lược Quant (tối ưu hóa điểm vào EMA & lọc volume giúp tối ưu alpha và giảm sụt giảm)
         quant_rets = vnindex_rets * 1.22 + np.random.normal(loc=0.0002, scale=0.007, size=len(dates))
         quant_equity = 100 * (1 + quant_rets).cumprod()
         
@@ -97,7 +95,10 @@ if app_mode == "📈 Backtest Lịch sử 3 năm":
 # --- NẾU CHỌN CHẾ ĐỘ DASHBOARD REAL-TIME & T+ GỐC ---
 else:
     st.title("🔥 HỆ THỐNG ĐỊNH LƯỢNG & QUẢN TRỊ DANH MỤC HOSE")
-    st.markdown(f"🕒 *Cập nhật Real-time | Lần quét gần nhất: {datetime.datetime.now().strftime('%H:%M:%S - %d/%m/%Y')}*")
+    
+    # Cập nhật múi giờ Việt Nam (UTC+7)
+    vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+    st.markdown(f"🕒 *Cập nhật Real-time | Lần quét gần nhất: {vn_time.strftime('%H:%M:%S - %d/%m/%Y')}*")
 
     hose_100 = [
         'VCB.VN', 'BID.VN', 'CTG.VN', 'TCB.VN', 'MBB.VN', 'ACB.VN', 'STB.VN', 'HDB.VN', 'VPB.VN', 'TPB.VN', 
@@ -158,7 +159,7 @@ else:
                     
                     portfolio_sim.append({
                         "Mã CP": clean_t,
-                        "Ngày Mua": datetime.datetime.now().strftime('%d/%m/%Y'),
+                        "Ngày Mua": vn_time.strftime('%d/%m/%Y'),
                         "Giá Mua (Entry)": entry_price,
                         "T+1 (%)": "Đang chờ phiên tới",
                         "T+2 (%)": "Đang chờ",
@@ -175,7 +176,7 @@ else:
     if enable_telegram and telegram_token and telegram_chat_id and not df_signals.empty:
         for _, row in df_signals.iterrows():
             t_code = row["Mã CP"]
-            alert_key = f"{t_code}_{datetime.datetime.now().strftime('%Y-%m-%d')}"
+            alert_key = f"{t_code}_{vn_time.strftime('%Y-%m-%d')}"
             
             if alert_key not in st.session_state.sent_signals:
                 msg = (
