@@ -1,4 +1,18 @@
 
+import requests
+
+def send_telegram_msg(token, chat_id, text):
+    if not token or not chat_id or not text:
+        return False
+    url = f"https://api.telegram.org/bot{token.strip()}/sendMessage"
+    payload = {"chat_id": str(chat_id).strip(), "text": text, "parse_mode": "Markdown"}
+    try:
+        r = requests.post(url, json=payload, timeout=8)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 from pathlib import Path
 import json
 import numpy as np
@@ -50,6 +64,20 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Weights/scores are research ranking features, not calibrated return probabilities.")
     st.caption("DNSE integration should replace Yahoo Finance before live execution.")
+    st.markdown("---")
+    st.subheader("🤖 Cấu hình Telegram Bot")
+    tg_token = st.text_input("Bot Token", type="password", help="Token lấy từ @BotFather")
+    tg_chat_id = st.text_input("Chat ID", help="Lấy từ @userinfobot")
+    auto_tg = st.checkbox("Bật tự động báo tín hiệu T+0", value=True)
+    if st.button("🔔 Gửi tin nhắn Test Telegram"):
+        if tg_token and tg_chat_id:
+            ok = send_telegram_msg(tg_token, tg_chat_id, "🚀 *HOSE Quant V2.1.1*: Kết nối Telegram thành công!")
+            if ok:
+                st.success("Đã gửi tin nhắn test thành công!")
+            else:
+                st.error("Gửi thất bại! Kiểm tra lại Token hoặc Chat ID.")
+        else:
+            st.warning("Vui lòng điền đủ Bot Token và Chat ID.")
 
 cfg = StrategyConfig(
     vol_trigger=vol_trigger,
@@ -271,6 +299,17 @@ with tabs[0]:
         signal_rows = scan[scan["Signal now"]].sort_values("Composite score", ascending=False)
         st.markdown(f"#### Current T+0 candidates · {len(signal_rows)}")
         st.dataframe(signal_rows, hide_index=True, width="stretch", height=460)
+        if tg_token and tg_chat_id and not signal_rows.empty:
+            if st.button("📲 Bắn tín hiệu danh mục T+0 sang Telegram ngay"):
+                msg = f"🚨 *HOSE QUANT V2.1.1 — TÍN HIỆU T+0 ({latest})*\n\n"
+                for _, s_row in signal_rows.iterrows():
+                    msg += f"• *{s_row['Ticker']}* — Giá: `{s_row['Indicative live']:,.0f}`\n"
+                    msg += f"  Mẫu hình: `{s_row['Wyckoff'] or 'EMA Cross'}` | Score: `{s_row['Technical score']}`\n"
+                    msg += f"  Mục tiêu TP (+15%): `{s_row['Indicative live'] * 1.15:,.0f}` | Cắt lỗ SL (-5%): `{s_row['Indicative live'] * 0.95:,.0f}`\n\n"
+                if send_telegram_msg(tg_token, tg_chat_id, msg):
+                    st.success("Đã bắn toàn bộ tín hiệu T+0 sang Telegram của bạn!")
+                else:
+                    st.error("Gửi tin nhắn sang Telegram thất bại.")
 
         st.markdown("#### Full live-ranked universe")
         st.dataframe(scan.sort_values("Composite score", ascending=False), hide_index=True, width="stretch", height=520)
