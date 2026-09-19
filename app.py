@@ -15,8 +15,8 @@ count = st_autorefresh(interval=60000, key="datarefresh")
 
 # --- THANH CÀI ĐẶT TELEGRAM BÊN TRÁI (SIDEBAR) ---
 st.sidebar.markdown("## ⚙️ Cấu hình Telegram Bot")
-telegram_token = st.sidebar.text_input("Bot Token", value="8319417072:AAEKlU86oOD4xfG2PmMly9WlHKjhBo3ahE4", type="password")
-telegram_chat_id = st.sidebar.text_input("Chat ID", value="8841617042")
+telegram_token = st.sidebar.text_input("Bot Token", value="", type="password")
+telegram_chat_id = st.sidebar.text_input("Chat ID", value="")
 enable_telegram = st.sidebar.checkbox("🚀 Bật tự động bắn tin nhắn", value=True)
 
 # --- BỘ GIẢ LẬP NGÀY ---
