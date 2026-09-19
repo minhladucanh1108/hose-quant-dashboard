@@ -389,10 +389,53 @@ with tabs[2]:
             open=tail["Open"], high=tail["High"], low=tail["Low"], close=tail["Close"],
             name="Price"
         ))
-        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA20"], name="EMA20"))
-        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA50"], name="EMA50"))
-        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA200"], name="EMA200"))
-        fig.update_layout(height=620, xaxis_rangeslider_visible=False)
+        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA20"], name="EMA20", line=dict(color="#2962FF", width=1.2)))
+        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA50"], name="EMA50", line=dict(color="#FF6D00", width=1.2)))
+        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA200"], name="EMA200", line=dict(color="#D50000", width=1.5)))
+
+        # 1. Khung giá Wyckoff TR (Kháng cự / Hỗ trợ 20 phiên)
+        h20 = tail["High"].rolling(20).max().shift(1)
+        l20 = tail["Low"].rolling(20).min().shift(1)
+        fig.add_trace(go.Scatter(x=tail.index, y=h20, name="Kháng cự (TR High)", line=dict(color="rgba(255, 82, 82, 0.7)", width=1, dash="dash")))
+        fig.add_trace(go.Scatter(x=tail.index, y=l20, name="Hỗ trợ (TR Low)", line=dict(color="rgba(0, 230, 118, 0.7)", width=1, dash="dash")))
+
+        # 2. Nhãn Wyckoff SOS (Mũi tên xanh lá bùng nổ vượt đỉnh)
+        sos_pts = tail[tail["WY_SOS"]]
+        if not sos_pts.empty:
+            fig.add_trace(go.Scatter(
+                x=sos_pts.index, y=sos_pts["High"] * 1.015,
+                mode="text+markers", name="Wyckoff SOS",
+                text=["SOS" for _ in range(len(sos_pts))],
+                textposition="top center",
+                marker=dict(symbol="triangle-up", size=14, color="#00E676"),
+                textfont=dict(color="#00E676", size=12, family="Arial Black")
+            ))
+
+        # 3. Nhãn Wyckoff Spring (Mũi tên vàng rút chân bẫy đáy)
+        spring_pts = tail[tail["WY_SPRING"]]
+        if not spring_pts.empty:
+            fig.add_trace(go.Scatter(
+                x=spring_pts.index, y=spring_pts["Low"] * 0.985,
+                mode="text+markers", name="Wyckoff Spring",
+                text=["Spring" for _ in range(len(spring_pts))],
+                textposition="bottom center",
+                marker=dict(symbol="triangle-up", size=14, color="#FFD600"),
+                textfont=dict(color="#FFD600", size=12, family="Arial Black")
+            ))
+
+        # 4. Nhãn Wyckoff LPS (Điểm test hỗ trợ vol cạn)
+        lps_pts = tail[tail["WY_LPS"]]
+        if not lps_pts.empty:
+            fig.add_trace(go.Scatter(
+                x=lps_pts.index, y=lps_pts["Low"] * 0.99,
+                mode="text+markers", name="Wyckoff LPS",
+                text=["LPS" for _ in range(len(lps_pts))],
+                textposition="bottom center",
+                marker=dict(symbol="circle", size=8, color="#00E5FF"),
+                textfont=dict(color="#00E5FF", size=10)
+            ))
+
+        fig.update_layout(height=650, xaxis_rangeslider_visible=False, template="plotly_dark")
         st.plotly_chart(fig, width="stretch")
 
         r = f.iloc[-1]
