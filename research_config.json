@@ -1,0 +1,7 @@
+{
+  "primary_mode": "WYCKOFF",
+  "vol_trigger": 1.5,
+  "cross_lookback": 3,
+  "min_hold_sessions": 2,
+  "max_hold_sessions": 10
+}

@@ -1,328 +1,479 @@
+
+from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import numpy as np
-import datetime
-import requests
 import plotly.graph_objects as go
-from streamlit_autorefresh import st_autorefresh
-import warnings
-warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="HOSE Quant Trading Dashboard", layout="wide")
+from quant_engine import StrategyConfig, add_features, signal_mask, backtest_trades, trade_metrics
+from cohort_engine import load_cohorts, load_marks, load_summary, cohort_matrix
 
-count = st_autorefresh(interval=60000, key="datarefresh")
+st.set_page_config(page_title="HOSE Quant Trading V2", layout="wide")
 
-# --- THANH CÀI ĐẶT TELEGRAM BÊN TRÁI (SIDEBAR) ---
-st.sidebar.markdown("## ⚙️ Cấu hình Telegram Bot")
-telegram_token = st.sidebar.text_input("Bot Token", value="", type="password")
-telegram_chat_id = st.sidebar.text_input("Chat ID", value="")
-enable_telegram = st.sidebar.checkbox("🚀 Bật tự động bắn tin nhắn", value=True)
+UNIVERSE = [
+    "VCB.VN","BID.VN","CTG.VN","TCB.VN","MBB.VN","ACB.VN","STB.VN","HDB.VN","VPB.VN","TPB.VN",
+    "VIB.VN","LPB.VN","MSB.VN","OCB.VN","SHB.VN","SSI.VN","VCI.VN","VND.VN","HCM.VN","FTS.VN",
+    "BSI.VN","CTS.VN","HPG.VN","HSG.VN","NKG.VN","VHM.VN","VIC.VN","VRE.VN","PDR.VN","DIG.VN",
+    "DXG.VN","KDH.VN","NLG.VN","FCN.VN","KBC.VN","VCG.VN","FPT.VN","MWG.VN","PNJ.VN","DGW.VN",
+    "FRT.VN","CTR.VN","VNM.VN","MSN.VN","SAB.VN","PAN.VN","GAS.VN","PLX.VN","POW.VN","GVR.VN",
+    "PVD.VN","NT2.VN","PC1.VN","REE.VN","DPM.VN","DCM.VN","CSV.VN","PHR.VN","VHC.VN","ANV.VN",
+    "FMC.VN","HAG.VN","DBC.VN","VJC.VN","GMD.VN","HAH.VN","SCS.VN","BVH.VN"
+]
 
-# --- BỘ GIẢ LẬP NGÀY ---
-st.sidebar.markdown("---")
-st.sidebar.markdown("## 🧪 Chế độ Chạy Thật / Test")
-use_mock_date = st.sidebar.checkbox("Bật chế độ test ngày", value=False)
+MODE_LABELS = {
+    "EMA_VOL": "EMA20/50 + Volume (không MA200)",
+    "EMA_VOL_MA200": "EMA20/50 + Volume + MA200",
+    "WYCKOFF": "Wyckoff event proxies",
+    "COMPOSITE": "Composite Technical + Wyckoff",
+}
 
-if use_mock_date:
-    mock_date_val = st.sidebar.date_input("Chọn ngày giả lập", value=datetime.date.today())
-    vn_time = datetime.datetime.combine(mock_date_val, datetime.time(14, 30, 0))
-    target_date_str = mock_date_val.strftime('%Y-%m-%d')
-else:
-    vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
-    target_date_str = vn_time.strftime('%Y-%m-%d')
+st.title("HOSE Quant Trading V2 · Research Dashboard")
+st.caption(
+    "Daily-bar research scanner. Signal is formed at close t; executable paper entry is next available open t+1. "
+    "Current Yahoo Finance feed is a fallback research source, not an exchange-grade realtime feed."
+)
 
-app_mode = st.sidebar.selectbox("Chọn Chế độ Hiển thị", ["📊 Dashboard Real-time & Danh mục T+", "📈 Backtest Lịch sử 3 năm"])
-
-def send_telegram_alert(token, chat_id, message):
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
-        response = requests.post(url, json=payload)
-        if response.status_code == 200:
-            return True
-        else:
-            st.sidebar.error(f"Lỗi Telegram ({response.status_code}): {response.text}")
-            return False
-    except Exception as e:
-        st.sidebar.error(f"Lỗi kết nối: {e}")
-        return False
-
-if enable_telegram and telegram_token and telegram_chat_id:
-    test_key = "test_connection_sent"
-    if test_key not in st.session_state:
-        success = send_telegram_alert(telegram_token, telegram_chat_id, "🤖 *Hệ thống Quant HOSE đã kết nối Telegram thành công!*")
-        if success:
-            st.session_state[test_key] = True
-
-if app_mode == "📈 Backtest Lịch sử 3 năm":
-    st.markdown("## 📈 Đánh giá Hiệu suất Chiến lược (Backtest 3 Năm - HOSE)")
-    st.info("Mô phỏng hiệu suất chiến lược định lượng dựa trên dữ liệu lịch sử thực tế từ 15/09/2023 đến 15/09/2026.")
-    
-    @st.cache_data(ttl=3600)
-    def get_market_backtest():
-        dates = pd.date_range(start="2023-09-15", end="2026-09-15", freq="B")
-        np.random.seed(2026)
-        trend = np.linspace(0, 0.45, len(dates))
-        cycles = np.sin(np.linspace(0, 4 * np.pi, len(dates))) * 0.08
-        noise = np.random.normal(loc=0.0001, scale=0.011, size=len(dates))
-        vnindex_rets = trend / len(dates) + cycles / 100 + noise
-        vnindex_equity = 100 * (1 + vnindex_rets).cumprod()
-        quant_rets = vnindex_rets * 1.22 + np.random.normal(loc=0.0002, scale=0.007, size=len(dates))
-        quant_equity = 100 * (1 + quant_rets).cumprod()
-        df = pd.DataFrame({"Chiến Lược Quant": quant_equity, "VN-Index": vnindex_equity}, index=dates)
-        return df
-
-    df_bt = get_market_backtest()
-    strat_final = df_bt['Chiến Lược Quant'].iloc[-1]
-    total_return = (strat_final - 100) / 100 * 100
-    days = len(df_bt)
-    cagr = ((strat_final / 100) ** (365 / days)) - 1
-    daily_rets = df_bt['Chiến Lược Quant'].pct_change().dropna()
-    sharpe_ratio = (daily_rets.mean() / daily_rets.std()) * np.sqrt(252) if daily_rets.std() > 0 else 0
-    rolling_max = df_bt['Chiến Lược Quant'].cummax()
-    drawdown = (df_bt['Chiến Lược Quant'] - rolling_max) / rolling_max
-    max_drawdown = drawdown.min() * 100
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Tổng Lợi Nhuận (3 Năm)", f"+{total_return:.2f}%")
-    col2.metric("CAGR (Lợi nhuận kép)", f"{cagr*100:.2f}%/năm")
-    col3.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
-    col4.metric("Max Drawdown", f"{max_drawdown:.2f}%")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df_bt.index, y=df_bt['Chiến Lược Quant'], name="Chiến Lược Quant (EMA + Vol)", line=dict(color="#00CC96", width=2)))
-    fig.add_trace(go.Scatter(x=df_bt.index, y=df_bt['VN-Index'], name="VN-Index (Benchmark)", line=dict(color="#EF553B", width=1.5, dash="dot")))
-    fig.update_layout(title="Đường cong vốn (Equity Curve) 3 năm so với VN-Index", xaxis_title="Thời gian", yaxis_title="Danh mục (Gốc=100)", template="plotly_dark", height=500)
-    st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.title("🔥 HỆ THỐNG ĐỊNH LƯỢNG & QUẢN TRỊ DANH MỤC HOSE")
-    
-    if use_mock_date:
-        vn_time = datetime.datetime.combine(mock_date_val, datetime.time(14, 30, 0))
-        target_date_str = mock_date_val.strftime('%Y-%m-%d')
-    else:
-        vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
-        target_date_str = vn_time.strftime('%Y-%m-%d')
-        
-    today_str = vn_time.strftime('%d/%m/%Y')
-    st.markdown(f"🕒 *Cập nhật Real-time trong phiên | Lần quét gần nhất: {vn_time.strftime('%H:%M:%S - %d/%m/%Y')} (GMT+7)*")
-
-    hose_100 = [
-        'VCB.VN', 'BID.VN', 'CTG.VN', 'TCB.VN', 'MBB.VN', 'ACB.VN', 'STB.VN', 'HDB.VN', 'VPB.VN', 'TPB.VN', 
-        'VIB.VN', 'LPB.VN', 'MSB.VN', 'OCB.VN', 'SHB.VN',
-        'SSI.VN', 'VCI.VN', 'VND.VN', 'HCM.VN', 'FTS.VN', 'BSI.VN', 'CTS.VN',
-        'HPG.VN', 'HSG.VN', 'NKG.VN',
-        'VHM.VN', 'VIC.VN', 'VRE.VN', 'PDR.VN', 'DIG.VN', 'DXG.VN', 'KDH.VN', 'NLG.VN', 'FCN.VN', 'KBC.VN', 'VCG.VN',
-        'FPT.VN', 'MWG.VN', 'PNJ.VN', 'DGW.VN', 'FRT.VN', 'CTR.VN',
-        'VNM.VN', 'MSN.VN', 'SAB.VN', 'PAN.VN',
-        'GAS.VN', 'PLX.VN', 'POW.VN', 'GVR.VN', 'PVD.VN', 'NT2.VN', 'PC1.VN', 'REE.VN',
-        'DPM.VN', 'DCM.VN', 'CSV.VN', 'PHR.VN',
-        'VHC.VN', 'ANV.VN', 'FMC.VN', 'HAG.VN', 'DBC.VN',
-        'VJC.VN', 'GMD.VN', 'HAH.VN', 'SCS.VN', 'BVH.VN'
-    ]
-
-    if 'sent_signals' not in st.session_state:
-        st.session_state.sent_signals = set()
-    if 'daily_signals_store' not in st.session_state:
-        st.session_state.daily_signals_store = {}
-    if 'portfolio_active' not in st.session_state:
-        st.session_state.portfolio_active = []
-    if 'portfolio_history' not in st.session_state:
-        st.session_state.portfolio_history = []
-    if 'last_simulated_date' not in st.session_state:
-        st.session_state.last_simulated_date = today_str
-
-    # Hàm quét với bộ lọc chuẩn chiến lược (EMA20 cắt lên EMA50 + Volume bùng nổ 1.5x)
-    @st.cache_data(ttl=60)
-    def scan_market(tickers, target_date, is_mock):
-        signals = []
-        if is_mock:
-            end_dt = pd.to_datetime(target_date) + datetime.timedelta(days=1)
-            start_dt = end_dt - datetime.timedelta(days=200)
-            for ticker in tickers:
-                try:
-                    df = yf.download(ticker, start=start_dt.strftime('%Y-%m-%d'), end=end_dt.strftime('%Y-%m-%d'), progress=False)
-                    if df.empty or len(df) < 50: continue
-                    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-                    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-                    df['Vol_SMA20'] = df['Volume'].rolling(window=20).mean()
-                    latest = df.iloc[-1]
-                    
-                    ema_spread = (df['EMA_20'] - df['EMA_50']) / df['EMA_50']
-                    is_cross = (latest['EMA_20'] > latest['EMA_50']) and (ema_spread.iloc[-1] > 0.005)
-                    is_volume_spike = latest['Volume'] > latest['Vol_SMA20'] * 1.5
-                    
-                    if is_cross and is_volume_spike:
-                        entry_price = round(float(latest['Close']), 2)
-                        signals.append({"Mã CP": ticker.replace('.VN', ''), "Điểm Mua (Entry)": entry_price, "Cắt Lỗ (-5%)": round(entry_price * 0.95, 2), "Chốt Lời (+15%)": round(entry_price * 1.15, 2), "Khối lượng GD": int(latest['Volume'])})
-                except Exception: pass
-        else:
-            for ticker in tickers:
-                try:
-                    df = yf.download(ticker, period="6mo", progress=False)
-                    if df.empty or len(df) < 50: continue
-                    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
-                    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
-                    df['Vol_SMA20'] = df['Volume'].rolling(window=20).mean()
-                    latest = df.iloc[-1]
-                    
-                    ema_spread = (df['EMA_20'] - df['EMA_50']) / df['EMA_50']
-                    is_cross = (latest['EMA_20'] > latest['EMA_50']) and (ema_spread.iloc[-1] > 0.005)
-                    is_volume_spike = latest['Volume'] > latest['Vol_SMA20'] * 1.5
-                    
-                    if is_cross and is_volume_spike:
-                        entry_price = round(float(latest['Close']), 2)
-                        signals.append({"Mã CP": ticker.replace('.VN', ''), "Điểm Mua (Entry)": entry_price, "Cắt Lỗ (-5%)": round(entry_price * 0.95, 2), "Chốt Lời (+15%)": round(entry_price * 1.15, 2), "Khối lượng GD": int(latest['Volume'])})
-                except Exception: pass
-        return pd.DataFrame(signals)
-
-    df_signals = scan_market(hose_100, target_date_str, use_mock_date)
-
-    # --- CHỈ CHẠY QUẢN TRỊ DANH MỤC T+ KHI KHÔNG BẬT TEST (CHẠY THẬT) ---
-    if not use_mock_date:
-        if st.session_state.last_simulated_date != today_str:
-            st.session_state.last_simulated_date = today_str
-            for item in st.session_state.portfolio_active:
-                item['days_count'] += 1
-
-        if not df_signals.empty:
-            if today_str not in st.session_state.daily_signals_store:
-                st.session_state.daily_signals_store[today_str] = df_signals
-            else:
-                existing_df = st.session_state.daily_signals_store[today_str]
-                combined_df = pd.concat([existing_df, df_signals]).drop_duplicates(subset=["Mã CP"]).reset_index(drop=True)
-                st.session_state.daily_signals_store[today_str] = combined_df
-
-            current_day_signals = st.session_state.daily_signals_store[today_str]
-            for _, row in current_day_signals.iterrows():
-                already_exists = any(item['Mã CP'] == row['Mã CP'] for item in st.session_state.portfolio_active)
-                if not already_exists:
-                    st.session_state.portfolio_active.append({
-                        "Mã CP": row['Mã CP'],
-                        "Ngày Mua": today_str,
-                        "Giá Mua (Entry)": row['Điểm Mua (Entry)'],
-                        "days_count": 0,
-                        "T+1 (%)": "Chờ",
-                        "T+2 (%)": "Chờ",
-                        "T+3 (%)": "Chờ",
-                        "T+5 (%)": "Chờ",
-                        "T+10 (%)": "Chờ"
-                    })
-
-        active_retained = []
-        for item in st.session_state.portfolio_active:
-            t_days = item['days_count']
-            buy_date_str = item['Ngày Mua']
-            try:
-                buy_dt = datetime.datetime.strptime(buy_date_str, '%d/%m/%Y').date()
-                hist_df = yf.download(item['Mã CP'] + ".VN", start=buy_dt.strftime('%Y-%m-%d'), progress=False)
-                if not hist_df.empty:
-                    if isinstance(hist_df.columns, pd.MultiIndex): hist_df.columns = hist_df.columns.get_level_values(0)
-                    close_prices = hist_df['Close']
-                    entry_price = item['Giá Mua (Entry)']
-                    
-                    if len(close_prices) > t_days:
-                        current_t_price = float(close_prices.iloc[min(t_days, len(close_prices)-1)])
-                        pnl = round(((current_t_price - entry_price) / entry_price) * 100, 2)
-                        
-                        if t_days >= 1: item['T+1 (%)'] = pnl
-                        if t_days >= 2: item['T+2 (%)'] = pnl
-                        if t_days >= 3: item['T+3 (%)'] = pnl
-                        if t_days >= 5: item['T+5 (%)'] = pnl
-                        if t_days >= 10: item['T+10 (%)'] = pnl
-            except Exception: pass
-
-            if t_days > 10:
-                item['Kết quả cuối cùng (%)'] = item['T+10 (%)']
-                item['Trạng thái'] = "LÃI 🎉" if isinstance(item['Kết quả cuối cùng (%)'], (int, float)) and item['Kết quả cuối cùng (%)'] > 0 else "LỖ 🔻"
-                st.session_state.portfolio_history.append(item)
-            else:
-                active_retained.append(item)
-                
-        st.session_state.portfolio_active = active_retained
-
-    # --- KHÓA CHẶT TELEGRAM: CHỈ BẮN KHI CHẠY THẬT VÀ CÓ TÍN HIỆU THỰC TẾ ---
-    if not use_mock_date and enable_telegram and telegram_token and telegram_chat_id and not df_signals.empty:
-        for _, row in df_signals.iterrows():
-            t_code = row["Mã CP"]
-            alert_key = f"{t_code}_{today_str}"
-            if alert_key not in st.session_state.sent_signals:
-                msg = (
-                    f"🚨 *[BÁO MUA - HOSE SIGNAL ({today_str})]* 🚨\n\n"
-                    f"📊 Mã cổ phiếu: *{t_code}*\n"
-                    f"💰 Điểm Mua (Entry): `{row['Điểm Mua (Entry)']}`\n"
-                    f"🛑 Cắt Lỗ (SL -5%): `{row['Cắt Lỗ (-5%)']}`\n"
-                    f"🎯 Chốt Lời (TP +15%): `{row['Chốt Lời (+15%)']}`\n"
-                    f"📈 Khối lượng bùng nổ vượt 1.5x trung bình 20 phiên!"
-                )
-                success = send_telegram_alert(telegram_token, telegram_chat_id, msg)
-                if success:
-                    st.session_state.sent_signals.add(alert_key)
-
-    # Hiển thị Dashboard
-    display_signals_df = df_signals if use_mock_date else st.session_state.daily_signals_store.get(today_str, pd.DataFrame())
-    eval_date_label = target_date_str if use_mock_date else today_str
-
-    st.subheader(f"1️⃣ Danh sách Cổ phiếu Phát Tín Hiệu Mua (Ngày {eval_date_label})")
-    if not display_signals_df.empty:
-        st.success(f"🔥 Tổng hợp các mã đạt chuẩn điểm mua trong ngày ({len(display_signals_df)} mã):")
-        st.dataframe(display_signals_df, use_container_width=True)
-    else:
-        st.info("⏳ Chưa có mã nào kích hoạt điểm mua mới trong ngày này.")
-
+with st.sidebar:
+    st.header("Research controls")
+    selected_mode = st.selectbox(
+        "Strategy variant",
+        options=list(MODE_LABELS),
+        format_func=lambda x: MODE_LABELS[x],
+        index=1,
+    )
+    vol_trigger = st.slider("Volume trigger / SMA20", 1.0, 2.5, 1.5, 0.05)
+    cross_lookback = st.slider("Crossover lookback (sessions)", 1, 10, 3, 1)
+    min_hold = st.slider("Minimum holding sessions", 0, 5, 2, 1)
+    max_hold = st.slider("Maximum holding sessions", 3, 20, 10, 1)
     st.markdown("---")
+    st.caption("Weights/scores are research ranking features, not calibrated return probabilities.")
+    st.caption("DNSE integration should replace Yahoo Finance before live execution.")
 
-    # --- PHÂN TÁCH GIAO DIỆN THEO CHẾ ĐỘ TEST HOẶC CHẠY THẬT ---
-    if use_mock_date:
-        # KHI BẬT TEST: Hiển thị bảng so sánh hiệu suất từ ngày test đến hiện tại
-        st.subheader(f"🧪 Đánh Giá Hiệu Suất Test (Mua ngày {target_date_str} so với Hiện tại)")
-        if not display_signals_df.empty:
-            test_perf_list = []
-            for _, row in display_signals_df.iterrows():
-                t_code = row["Mã CP"]
-                entry_p = row["Điểm Mua (Entry)"]
-                try:
-                    live_df = yf.download(t_code + ".VN", period="5d", progress=False)
-                    if not live_df.empty:
-                        if isinstance(live_df.columns, pd.MultiIndex): live_df.columns = live_df.columns.get_level_values(0)
-                        current_p = float(live_df['Close'].iloc[-1])
-                        pnl_pct = round(((current_p - entry_p) / entry_p) * 100, 2)
-                        status = "LÃI 🎉" if pnl_pct > 0 else "LỖ 🔻"
-                        test_perf_list.append({
-                            "Mã CP": t_code,
-                            "Giá Mua (Test)": entry_p,
-                            "Giá Hiện Tại": round(current_p, 2),
-                            "Hiệu Suất (%)": pnl_pct,
-                            "Trạng Thái": status
-                        })
-                except Exception: pass
-            
-            if test_perf_list:
-                df_test_perf = pd.DataFrame(test_perf_list)
-                st.dataframe(df_test_perf, use_container_width=True)
-            else:
-                st.warning("⚠️ Không thể tải dữ liệu giá hiện tại để so sánh.")
-        else:
-            st.info("⏳ Không có mã nào trong ngày test để đánh giá hiệu suất.")
+cfg = StrategyConfig(
+    vol_trigger=vol_trigger,
+    cross_lookback=cross_lookback,
+    min_hold_sessions=min_hold,
+    max_hold_sessions=max_hold,
+)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_batch(tickers, period="3y"):
+    raw = yf.download(
+        tickers=list(tickers),
+        period=period,
+        interval="1d",
+        group_by="ticker",
+        auto_adjust=False,
+        progress=False,
+        threads=True,
+    )
+    out = {}
+    if raw is None or raw.empty:
+        return out
+
+    if len(tickers) == 1:
+        out[tickers[0]] = raw.dropna(how="all")
+        return out
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        lvl0 = set(map(str, raw.columns.get_level_values(0)))
+        lvl1 = set(map(str, raw.columns.get_level_values(1)))
+        for t in tickers:
+            try:
+                if t in lvl0:
+                    d = raw[t].dropna(how="all")
+                elif t in lvl1:
+                    d = raw.xs(t, axis=1, level=1).dropna(how="all")
+                else:
+                    continue
+                if not d.empty:
+                    out[t] = d
+            except Exception:
+                continue
+    return out
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sentiment():
+    p = Path("news_sentiment.csv")
+    if not p.exists():
+        return pd.DataFrame(columns=["ticker","sentiment_score","article_count","last_title","last_url","updated_at_utc"])
+    x = pd.read_csv(p)
+    if "ticker" in x.columns:
+        x["ticker"] = x["ticker"].astype(str).str.upper().str.strip()
+    return x
+
+sent = load_sentiment()
+sent_map = sent.set_index("ticker")["sentiment_score"].to_dict() if not sent.empty else {}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_intraday_batch(tickers):
+    """
+    Research-only current-session bar using Yahoo 1-minute fallback.
+    This is not exchange-grade realtime and may be delayed/incomplete.
+    """
+    try:
+        raw = yf.download(
+            tickers=list(tickers),
+            period="1d",
+            interval="1m",
+            group_by="ticker",
+            auto_adjust=False,
+            progress=False,
+            threads=True,
+            prepost=False,
+        )
+    except Exception:
+        return {}
+
+    out = {}
+    if raw is None or raw.empty:
+        return out
+
+    if len(tickers) == 1:
+        out[tickers[0]] = raw.dropna(how="all")
+        return out
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        lvl0 = set(map(str, raw.columns.get_level_values(0)))
+        lvl1 = set(map(str, raw.columns.get_level_values(1)))
+        for t in tickers:
+            try:
+                if t in lvl0:
+                    d = raw[t].dropna(how="all")
+                elif t in lvl1:
+                    d = raw.xs(t, axis=1, level=1).dropna(how="all")
+                else:
+                    continue
+                if not d.empty:
+                    out[t] = d
+            except Exception:
+                continue
+    return out
+
+
+def append_live_bar(daily: pd.DataFrame, intraday: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate current intraday observations into one provisional daily bar and
+    append/replace that calendar day. Used only for the T+0 live research view.
+    """
+    if daily is None or daily.empty:
+        return daily
+    if intraday is None or intraday.empty:
+        return daily.copy()
+
+    d = daily.copy()
+    i = intraday.copy()
+    if isinstance(i.columns, pd.MultiIndex):
+        i.columns = i.columns.get_level_values(0)
+
+    req = ["Open","High","Low","Close","Volume"]
+    if not all(c in i.columns for c in req):
+        return d
+
+    for c in req:
+        i[c] = pd.to_numeric(i[c], errors="coerce")
+    i = i.dropna(subset=["Open","High","Low","Close"])
+    if i.empty:
+        return d
+
+    day = pd.Timestamp(i.index[-1]).date()
+    live_row = pd.DataFrame(
+        {
+            "Open": [float(i["Open"].dropna().iloc[0])],
+            "High": [float(i["High"].max())],
+            "Low": [float(i["Low"].min())],
+            "Close": [float(i["Close"].dropna().iloc[-1])],
+            "Volume": [float(i["Volume"].fillna(0).sum())],
+        },
+        index=[pd.Timestamp(day)],
+    )
+
+    d.index = pd.to_datetime(d.index)
+    d = d[d.index.normalize() != pd.Timestamp(day)]
+    return pd.concat([d, live_row]).sort_index()
+
+
+def fmt_pct(v):
+    return "—" if pd.isna(v) else f"{float(v):+.2f}%"
+
+tabs = st.tabs(["Live T+0", "Frozen cohorts", "Signal detail", "Backtest", "News sentiment", "Audit"])
+
+with tabs[0]:
+    st.subheader("Live T+0 research scanner")
+    st.caption(
+        "Dynamic current-session view. Price/volume use Yahoo 1-minute fallback when available. "
+        "The list may change intraday. It is NOT the frozen historical cohort."
+    )
+
+    with st.spinner("Loading daily history and current-session bars..."):
+        price_map = fetch_batch(tuple(UNIVERSE), "3y")
+        intraday_map = fetch_intraday_batch(tuple(UNIVERSE))
+
+    rows = []
+    errors = []
+    for ticker in UNIVERSE:
+        d = price_map.get(ticker)
+        if d is None or d.empty:
+            errors.append(ticker)
+            continue
+        try:
+            live_d = append_live_bar(d, intraday_map.get(ticker))
+            f = add_features(live_d, cfg)
+            if len(f) < 220:
+                errors.append(ticker)
+                continue
+            sig = signal_mask(f, selected_mode, cfg)
+            r = f.iloc[-1]
+            code = ticker.replace(".VN", "")
+            sentiment = float(sent_map.get(code, 0.0))
+            composite = float(np.clip(r["RESEARCH_SCORE"] + 10.0 * sentiment, 0, 100))
+            rows.append(
+                {
+                    "Ticker": code,
+                    "T+0 date": pd.Timestamp(f.index[-1]).date().isoformat(),
+                    "Indicative live": float(r["Close"]),
+                    "Signal now": bool(sig.iloc[-1]),
+                    "Above MA200": bool(r["ABOVE_MA200"]),
+                    "EMA20>50": bool(r["EMA_TREND"]),
+                    "Cross recent": bool(r["CROSS_RECENT"]),
+                    "Vol ratio": float(r["VOL_RATIO"]) if pd.notna(r["VOL_RATIO"]) else np.nan,
+                    "RSI14": float(r["RSI14"]) if pd.notna(r["RSI14"]) else np.nan,
+                    "Wyckoff": "SOS" if r["WY_SOS"] else ("Spring" if r["WY_SPRING"] else ("LPS" if r["WY_LPS"] else "")),
+                    "Technical score": float(r["RESEARCH_SCORE"]),
+                    "News sentiment": sentiment,
+                    "Composite score": composite,
+                    "Source": "Yahoo 1m fallback" if ticker in intraday_map else "Daily fallback",
+                }
+            )
+        except Exception as e:
+            errors.append(f"{ticker}: {e}")
+
+    scan = pd.DataFrame(rows)
+    if scan.empty:
+        st.error("No usable market rows were loaded.")
     else:
-        # KHI TẮT TEST (CHẠY THẬT): Giữ nguyên mục 2 và mục 3
-        st.subheader("2️⃣ Theo dõi Danh mục Ảo (Paper Trading T+)")
-        if len(st.session_state.portfolio_active) > 0:
-            display_cols = ["Mã CP", "Ngày Mua", "Giá Mua (Entry)", "T+1 (%)", "T+2 (%)", "T+3 (%)", "T+5 (%)", "T+10 (%)"]
-            df_active = pd.DataFrame(st.session_state.portfolio_active)[display_cols]
-            st.dataframe(df_active, use_container_width=True)
-        else:
-            st.info("⏳ Hiện tại danh mục ảo chưa có mã nào đang theo dõi.")
+        latest = scan["T+0 date"].max()
+        coverage = int((scan["T+0 date"] == latest).sum())
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Universe configured", len(UNIVERSE))
+        c2.metric("Usable", len(scan))
+        c3.metric("T+0 date", latest)
+        c4.metric("Coverage latest", f"{coverage}/{len(scan)}")
 
-        st.markdown("---")
-        
-        st.subheader("3️⃣ Sheet Lưu trữ Kết quả Đầu tư (Chốt sau T+10 đánh giá Lãi/Lỗ)")
-        if len(st.session_state.portfolio_history) > 0:
-            df_hist = pd.DataFrame(st.session_state.portfolio_history)
-            st.dataframe(df_hist, use_container_width=True)
-        else:
-            st.info("📂 Chưa có chu kỳ đầu tư nào hoàn tất vượt quá T+10 để chốt kết quả.")
+        st.warning(
+            "T+0 is intentionally dynamic. The official historical cohort is frozen only after the daily session "
+            "and never changes afterward. Until DNSE is connected, intraday prices are research-only Yahoo fallback."
+        )
+
+        signal_rows = scan[scan["Signal now"]].sort_values("Composite score", ascending=False)
+        st.markdown(f"#### Current T+0 candidates · {len(signal_rows)}")
+        st.dataframe(signal_rows, hide_index=True, width="stretch", height=460)
+
+        st.markdown("#### Full live-ranked universe")
+        st.dataframe(scan.sort_values("Composite score", ascending=False), hide_index=True, width="stretch", height=520)
+
+        if errors:
+            st.warning(f"{len(errors)} ticker(s) had missing/invalid data. See Audit tab.")
+
+with tabs[1]:
+    st.subheader("Frozen daily cohorts · T+0 to T+10")
+    st.caption(
+        "Each recommendation day is immutable once frozen. T+1/T+2/... are subsequent trading-session CLOSE prices, "
+        "not calendar days. At T+10 each ticker is summarized as WIN/LOSS/FLAT."
+    )
+
+    cohorts = load_cohorts()
+    marks = load_marks()
+    t10 = load_summary()
+
+    if cohorts.empty:
+        st.info(
+            "No frozen cohort exists yet. The scheduled daily_cohort_worker freezes the first cohort after market close."
+        )
+    else:
+        cohort_dates = sorted(cohorts["cohort_date"].astype(str).unique(), reverse=True)
+        selected_cohort = st.selectbox("Recommendation date", cohort_dates)
+        cm = cohort_matrix(selected_cohort)
+
+        base = cohorts[cohorts["cohort_date"].astype(str).eq(selected_cohort)]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Cohort date", selected_cohort)
+        c2.metric("Frozen names", len(base))
+        c3.metric("Primary mode", str(base["mode"].iloc[0]) if not base.empty else "—")
+        done_t10 = int(
+            t10["cohort_date"].astype(str).eq(selected_cohort).sum()
+        ) if not t10.empty else 0
+        c4.metric("T+10 completed", f"{done_t10}/{len(base)}")
+
+        show_cols = ["ticker","reference_price","reference_source","signal_score"]
+        for t in [0,1,2,3,5,10]:
+            if f"T+{t} %" in cm.columns:
+                show_cols.append(f"T+{t} %")
+            if f"T+{t} Close" in cm.columns:
+                show_cols.append(f"T+{t} Close")
+
+        display = cm[[c for c in show_cols if c in cm.columns]].copy()
+        for c in [x for x in display.columns if x.endswith(" %")]:
+            display[c] = display[c].map(fmt_pct)
+        st.dataframe(display, hide_index=True, width="stretch", height=520)
+
+        if not t10.empty:
+            summary = t10[t10["cohort_date"].astype(str).eq(selected_cohort)].copy()
+            if not summary.empty:
+                st.markdown("#### T+10 final results")
+                wins = int((summary["status"] == "WIN").sum())
+                losses = int((summary["status"] == "LOSS").sum())
+                avg = pd.to_numeric(summary["t10_return_pct"], errors="coerce").mean()
+                s1, s2, s3 = st.columns(3)
+                s1.metric("Wins", wins)
+                s2.metric("Losses", losses)
+                s3.metric("Average T+10", "—" if pd.isna(avg) else f"{avg:+.2f}%")
+                st.dataframe(summary, hide_index=True, width="stretch")
+
+with tabs[2]:
+    st.subheader("Signal detail")
+    if "scan" not in locals() or scan.empty:
+        st.info("Scanner must load first.")
+    else:
+        ticker = st.selectbox("Ticker", scan["Ticker"].tolist())
+        full_ticker = ticker + ".VN"
+        d = price_map.get(full_ticker)
+        f = add_features(d, cfg)
+        tail = f.tail(120).copy()
+
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=tail.index,
+            open=tail["Open"], high=tail["High"], low=tail["Low"], close=tail["Close"],
+            name="Price"
+        ))
+        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA20"], name="EMA20"))
+        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA50"], name="EMA50"))
+        fig.add_trace(go.Scatter(x=tail.index, y=tail["EMA200"], name="EMA200"))
+        fig.update_layout(height=620, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, width="stretch")
+
+        r = f.iloc[-1]
+        info = pd.DataFrame(
+            {
+                "Field": ["Date","Close","Above MA200","EMA20>EMA50","Cross recent","Volume ratio","RSI14","Wyckoff SOS","Wyckoff Spring","Wyckoff LPS","Research score","News sentiment"],
+                "Value": [
+                    str(pd.Timestamp(f.index[-1]).date()),
+                    f"{float(r['Close']):,.0f}",
+                    str(bool(r["ABOVE_MA200"])),
+                    str(bool(r["EMA_TREND"])),
+                    str(bool(r["CROSS_RECENT"])),
+                    f"{float(r['VOL_RATIO']):.2f}" if pd.notna(r["VOL_RATIO"]) else "—",
+                    f"{float(r['RSI14']):.1f}" if pd.notna(r["RSI14"]) else "—",
+                    str(bool(r["WY_SOS"])),
+                    str(bool(r["WY_SPRING"])),
+                    str(bool(r["WY_LPS"])),
+                    f"{float(r['RESEARCH_SCORE']):.1f}",
+                    f"{float(sent_map.get(ticker,0.0)):+.2f}",
+                ]
+            }
+        )
+        st.dataframe(info, hide_index=True, width="stretch")
+
+with tabs[3]:
+    st.subheader("Real OHLCV trade-level backtest")
+    st.warning(
+        "This replaces the old synthetic/random backtest. Metrics below are trade-level diagnostics, "
+        "not portfolio CAGR. Signal close t → entry next open t+1; fees are included."
+    )
+
+    default_bt = ["FPT.VN","HPG.VN","MBB.VN","MWG.VN","SSI.VN","VNM.VN","VPB.VN","VIC.VN","STB.VN","GMD.VN"]
+    bt_tickers = st.multiselect("Backtest tickers", UNIVERSE, default=default_bt)
+
+    compare_all = st.checkbox("Compare all 4 variants", value=True)
+    if st.button("Run backtest", type="primary"):
+        modes = list(MODE_LABELS) if compare_all else [selected_mode]
+        metric_rows = []
+        all_trades = []
+
+        for mode in modes:
+            mode_trades = []
+            for t in bt_tickers:
+                d = price_map.get(t)
+                if d is None or len(d) < 230:
+                    continue
+                try:
+                    tr = backtest_trades(d, mode, cfg)
+                    if not tr.empty:
+                        tr["ticker"] = t.replace(".VN","")
+                        tr["mode"] = mode
+                        mode_trades.append(tr)
+                except Exception:
+                    continue
+
+            combined = pd.concat(mode_trades, ignore_index=True) if mode_trades else pd.DataFrame()
+            m = trade_metrics(combined)
+            metric_rows.append(
+                {
+                    "Mode": MODE_LABELS[mode],
+                    "Trades": m["trades"],
+                    "Win rate": m["win_rate"],
+                    "Avg net/trade": m["avg_net_return"],
+                    "Median net/trade": m["median_net_return"],
+                    "Profit factor": m["profit_factor"],
+                }
+            )
+            if not combined.empty:
+                all_trades.append(combined)
+
+        metrics = pd.DataFrame(metric_rows)
+        for c in ["Win rate","Avg net/trade","Median net/trade"]:
+            metrics[c] = metrics[c].map(lambda x: "—" if pd.isna(x) else f"{100*x:.2f}%")
+        metrics["Profit factor"] = metrics["Profit factor"].map(
+            lambda x: "—" if pd.isna(x) else ("∞" if np.isinf(x) else f"{x:.2f}")
+        )
+        st.dataframe(metrics, hide_index=True, width="stretch")
+
+        if all_trades:
+            trades = pd.concat(all_trades, ignore_index=True)
+            show = trades.sort_values("entry_date", ascending=False).head(300).copy()
+            show["net_return"] = show["net_return"].map(lambda x: f"{100*x:.2f}%")
+            st.markdown("#### Recent evaluated trades")
+            st.dataframe(show, hide_index=True, width="stretch", height=520)
+
+        st.caption(
+            "Use this comparison as an ablation test. Do not select the variant with the best in-sample number and call it alpha. "
+            "Freeze rules, then validate on a later untouched period."
+        )
+
+with tabs[4]:
+    st.subheader("News sentiment overlay")
+    st.caption(
+        "RSS headline/summary baseline. It is intentionally separate from the price trigger so news can be audited "
+        "and tested incrementally before it is allowed to change execution."
+    )
+    if sent.empty:
+        st.info("news_sentiment.csv is not present yet. Run news_worker.py or enable the scheduled workflow.")
+    else:
+        st.dataframe(sent.sort_values(["sentiment_score","article_count"], ascending=[False,False]), hide_index=True, width="stretch")
+        st.caption("Baseline sentiment is a lightweight Vietnamese finance lexicon, not a calibrated financial-language model.")
+
+with tabs[5]:
+    st.subheader("Audit & methodology")
+    audit = [
+        ("Data source", "Yahoo Finance fallback, daily bars"),
+        ("Universe", f"Curated list: {len(UNIVERSE)} tickers; not the full historical HOSE universe"),
+        ("Signal timing", "Close t"),
+        ("Paper entry", "Next available session Open t+1"),
+        ("Fees", f"Buy {cfg.buy_fee:.2%}, sell {cfg.sell_fee:.2%}"),
+        ("Minimum hold", f"{cfg.min_hold_sessions} trading sessions"),
+        ("Maximum hold", f"{cfg.max_hold_sessions} trading sessions"),
+        ("Stop / TP", f"-{cfg.stop_loss:.0%} / +{cfg.take_profit:.0%}"),
+        ("Wyckoff", "Quantified event proxies only; no canonical phase claim"),
+        ("Sentiment", "Separate overlay; RSS title/summary lexicon baseline"),
+        ("Cohort persistence", "Git-tracked CSV ledgers updated by scheduled worker; historical cohorts immutable"),
+        ("Live execution", "Disabled"),
+    ]
+    st.dataframe(pd.DataFrame(audit, columns=["Field","Value"]), hide_index=True, width="stretch")
+
+    if "errors" in locals() and errors:
+        st.markdown("#### Data/load errors")
+        st.code("\n".join(map(str, errors[:100])))

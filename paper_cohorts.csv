@@ -1,0 +1,4 @@
+cohort_date,ticker,mode,reference_price,reference_source,signal_score,above_ma200,wy_sos,wy_spring,wy_lps,frozen_at_utc
+2026-09-18,ACB,EMA_VOL_MA200,21900.0,EOD_CLOSE,45.0,True,False,False,False,2026-09-19T09:42:21.657963+00:00
+2026-09-18,REE,WYCKOFF,47050.0,EOD_CLOSE,45.0,False,True,False,False,2026-09-19T09:54:33.740872+00:00
+2026-09-18,VJC,WYCKOFF,129000.0,EOD_CLOSE,55.0,True,True,False,False,2026-09-19T09:54:33.740872+00:00
